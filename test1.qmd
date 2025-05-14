@@ -1,0 +1,242 @@
+---
+title: "Retail Market Analysis"
+author: "Hanah Nguyen"
+format: 
+  html:
+    embed-resources: true
+    toc: true
+editor: visual
+---
+
+# Introduction
+
+**Objective:** This report aims to identify high-potential areas for a prospective retailer by analyzing historical sales data and demographic patterns across the US.
+
+**Data Sources:** This report will combine two data sets: Amazon sales_data and zip_info.
+
+**Target Audience:** This analysis is prepared for a prospective retail partner of Amazon who is evaluating potential U.S. store locations. The goal is to help them identify the most promising city, state, or ZIP code for their new store by analyzing Amazon product demand patterns alongside key local demographic indicators.
+
+**Analysis approach:** I analyze product-level sales patterns across time and geography, then integrate demographic data to identify ZIP codes where product demand aligns with local population traits.
+
+# Exploratory Data Analysis
+
+```{r}
+# load up libraries here
+library(tidyverse)
+library(rio)
+library(scales)
+library(ggrepel)
+library(patchwork)
+library(lubridate)
+library(treemapify)
+
+#load up dataset
+sales_data = import('sales_data.Rdata',trust=TRUE)
+zip_info=import('zip_info.csv')
+
+# Convert Quantiy and PriceEach to numeric datatype in sales_data
+sales_data$Quantity = as.numeric(sales_data$Quantity)
+sales_data$PriceEach = as.numeric(sales_data$PriceEach)
+
+# standardize ZIP codes to 5-digit character strings
+zip_info <- zip_info %>%
+  mutate(ZIP = sprintf("%05d", ZIP))
+```
+
+# Ad-hoc Tasks
+
+First, to assist your retail store location decision, I evaluated top-performing products by both total revenue and total quantity sold, revealing distinct trends. The charts show a clear distinction between top-selling products by revenue and by quantity. High-revenue items like laptops and smartphones sell less frequently but generate significant income per unit, while low-cost essentials like batteries and cables sell in much higher volumes. This suggests that areas with strong demand for premium electronics may differ from those with high turnover of every tech accessories.
+
+```{r}
+# Getting Top 5 in Quantity and Revenue
+top10 = sales_data%>%
+  group_by(Product)%>%
+  summarize(
+    TotalQuantity=sum(Quantity),
+    TotalRevenue=sum(Quantity*PriceEach),
+    .groups ="drop"
+  )
+
+# Top 5 Products by Revenue
+top_revenue = top10%>%arrange(desc(TotalRevenue))%>%head(5)
+
+# Top 5 Products by Quantity
+top_quantity = top10%>% arrange(desc(TotalQuantity)) %>% head(5)
+
+# top revenue chart
+p1 = ggplot(top_revenue, aes(x = reorder(Product, TotalRevenue), y=TotalRevenue))+
+  geom_col(fill="#1bcfb4")+
+  geom_text(aes(label = paste0(scales::comma(TotalRevenue/1e6),"M")), hjust = 1.2, size = 2.8,fontface="bold")+
+  coord_flip()+
+  labs(
+    title = "Top 5 by Revenue",
+    y = "Revenue (USD)"
+  )+
+  theme_classic()+
+  scale_y_continuous(labels=function(x) paste0(x/1e6,"M"))+
+  theme(
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(face="bold",family="serif"),
+    title=element_text(face="bold",family="serif"),
+     axis.text.y = element_text(face = "bold",family="serif")
+  )
+
+# top quantity chart
+p2 = ggplot(top_quantity, aes(x=reorder(Product,TotalQuantity), y=TotalQuantity))+ 
+  geom_col(fill="#4bcbeb")+
+  geom_text(aes(label = scales::comma(TotalQuantity)), hjust = 1.2, size = 2.8,fontface="bold")+
+  coord_flip()+
+  labs(
+    title = "Top 5 by Quantity",
+    y = "Quantity")+
+  theme_classic() + 
+  theme(
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(face="bold",family="serif"),
+     title=element_text(face="bold",family="serif"),
+     axis.text.y = element_text(face = "bold",family="serif")
+  )
+
+p1+p2
+
+```
+
+Next, I create a chart showing the sales volume and revenue specifically at each city. San Francisco, Los Angeles, and New York City lead in both metrics, indicating strong demand and high spending per order. These cities are key candidates for retail expansion, offering a balance of sales volume and customer purchasing power.
+
+```{r}
+# Cities Ranking by Sales Volume and Revenue
+city_performance = sales_data %>%
+  group_by(City, State) %>%
+  summarise(
+    TotalQuantity = sum(Quantity),
+    TotalRevenue = sum(Quantity * PriceEach), .groups="drop") %>%
+  arrange(desc(TotalQuantity)) %>%
+  head(10) %>%
+  mutate(CityState = paste(City, State, sep = ", "))
+
+# plot the chart
+ggplot(city_performance, aes(x = reorder(CityState, TotalQuantity), y = TotalQuantity)) +
+  geom_col(fill="#fe9496") +
+  scale_y_continuous(
+    name = "Total Quantity Sold",
+    sec.axis = sec_axis(~ . / max(city_performance$TotalQuantity) * max(city_performance$TotalRevenue), 
+                     name = "Total Revenue (USD)",
+                     labels = function(x) paste0(dollar_format()(x / 1e6), "M"))
+  ) +
+  labs(title = "Cities Ranking by Sales Volume and Revenue",
+       x = "City") +
+  coord_flip() +
+  theme_classic()+
+  theme(axis.title.x = element_text(face="bold",family="serif"),
+        axis.text.y = element_text(face = "bold",family="serif"),
+        title=element_text(face="bold",family="serif"),
+        plot.title=element_text(hjust=0.5,face="bold",size=18)
+        )
+```
+
+Then, I think understanding when shoppers are most active help the customer plan store hours, optimize labor and tailor promotions to align with customer behavior. The chart shows differences between weekdays and weekends. Weekday orders peak around lunchtime (12PM) and early evening (7PM), suggesting higher customer activity during working hours, while weekend orders are more evenly distributed throughout the day.
+
+```{r}
+# extract hour and daytype from DateTime
+heatmap = sales_data %>%
+  mutate(
+  DateTime = ymd_hms(DateTime),
+    Hour = hour(DateTime),
+    DayType = if_else(wday(DateTime) %in% c(1, 7), "Weekend", "Weekday"),
+    HourLabel = format(DateTime, format="%I %p")
+  )
+
+# aggregate order volume by Hour and DayType
+hourly_summary <- heatmap %>%
+  group_by(Hour,HourLabel, DayType) %>%
+  summarise(TotalOrders = n(), .groups = "drop")
+
+# stacked bar chart showing the differences in purchasing power 
+ggplot(hourly_summary, aes(x = Hour, y = TotalOrders, fill = DayType)) +
+  geom_bar(stat = "identity") +
+  scale_x_continuous(
+    breaks = seq(0, 23, by = 3), # Show every 3 hours
+    labels = function(x) format(strptime(x, "%H"), "%I %p")
+  ) +
+  scale_fill_manual(values = c("Weekday" = "#fe9496", "Weekend" = "#1bcfb4")) +
+  labs(
+    title = "Order Volume by Hour of Day (Weekday vs Weekend)",
+    x = "Hour of Day",
+    y = "Total Orders",
+    fill = "Day Type"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,face = "bold",family="serif"),
+        axis.text.y = element_text(face = "bold",family="serif"),
+        title=element_text(face="bold",family="serif"),
+        plot.title=element_text(hjust=0.5,face="bold",size=18)
+  )
+```
+
+Now, I explore whether Zipcodes with higher population also tend to have higher income and vice versa. From the graph below, the relationship between population size and household income is inverse, suggesting that more densely populated areas may have lower median incomes, while smaller-population areas often have higher earnings potential.
+
+```{r}
+ggplot(zip_info, aes(x = TotalPopulation, y = MedianHHIncome)) +
+  geom_point(color = "#4bcbeb", size = 5, alpha = 0.7) +
+  geom_smooth(method = 'lm', se = FALSE, color = "#9e58ff", linewidth = 1) +
+  labs(
+    title = "Relationship Between Population and Median Household Income",
+    x = "Total Population",
+    y = "Median Household Income (USD)"
+  ) +
+  theme_classic()+
+  theme(axis.title.x = element_text(face="bold",family="serif"),
+        axis.text.y = element_text(face = "bold",family="serif"),
+        axis.text.x = element_text(face = "bold",family="serif"),
+        title=element_text(face="bold",family="serif"),
+        plot.title=element_text(hjust=0.5,face="bold",size=15)
+        )
+```
+
+Lastly, to provide the customer a closer look on what cities have high-income vs high population size, I graph these two for comparison. This comparison helps identify areas with both a strong customer base and purchasing power. For instance, while Los Angeles, CA has the highest population among the 10 cities, it ranks second lowest in median household income — suggesting a large market, but potentially lower spending capacity per household. These insights enable more informed decisions when balancing market size with consumer affluence.
+
+```{r}
+# join two data sets together
+joined_data = sales_data%>%
+  inner_join(zip_info,by="ZIP")
+
+joined_data <- joined_data %>%
+  mutate(KeyCity = ifelse(MedianHHIncome > quantile(MedianHHIncome, 0.75) | 
+                          TotalPopulation > quantile(TotalPopulation, 0.75), "Highlighted", "Other"))
+
+ggplot(joined_data, aes(x = interaction(City, State, sep =","), 
+                        y = MedianHHIncome, 
+                        size = MedianHHIncome)) +
+  geom_point(color = "#fe9496", alpha = 1) +
+  labs(
+    title = "Median Household Income by City",
+    x = "City",
+    y = "Median Income"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,face = "bold",family="serif"),
+        axis.text.y = element_text(face = "bold",family="serif"),
+        title=element_text(face="bold",family="serif"),
+        plot.title=element_text(hjust=0.5,face="bold",size=18))
+
+
+ggplot(joined_data, aes(x = interaction(City, State, sep =","), 
+                        y = TotalPopulation, size = TotalPopulation)) +
+  geom_point(color = "#a05aff", alpha = 0.8) +
+  labs(
+    title = "Total Population by City",
+    x = "City",
+    y = "Population"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,face = "bold",family="serif"),
+        axis.text.y = element_text(face = "bold",family="serif"),
+        title=element_text(face="bold",family="serif"),
+        plot.title=element_text(hjust=0.5,face="bold",size=18)
+        )
+
+```
+
+# Conclusion
+
+Based on the analysis, cities like San Francisco, Los Angeles, and New York emerge as strong candidates for retail expansion due to high product demand and revenue potential. However, it's important to consider both market size and consumer purchasing power, as high population does not always equate to high income. Additionally, understanding peak shopping times can help optimize store operations. Overall, targeting locations that balance strong sales performance with favorable demographics will support a more effective and profitable store launch.
